@@ -71,15 +71,15 @@ function Test-TlsConnection
     ($connectResult, $remoteAddress, $negotiatedProtocol, $handshakeException) = TryToSecureConnect $ComputerName $Port $askedProtocols
     switch ($connectResult)
     {
-        ([ConnectTestResult]::Connected) { Write-Host "SUCCESS: Connected to $remoteAddress, secure channel negotiated using $(if ($negotiatedProtocol -eq [System.Security.Authentication.SslProtocols]::Tls) { "Tls10" } else { $negotiatedProtocol })" }
-        ([ConnectTestResult]::FailedTls) { Write-Host "FAIL: Connected to $remoteAddress, failed to negotiate secure channel in mode $TlsVersion. Error: $handshakeException" }
-        ([ConnectTestResult]::FailedNetwork) { Write-Error "FAIL: Failed to reach the destination. This is connectivity or DNS problem, *not* TLS issue." }
+        ([ConnectTestResult]::Connected) { Write-Host "SUCCESS: TCP connected, secure channel negotiated using $(if ($negotiatedProtocol -eq [System.Security.Authentication.SslProtocols]::Tls) { "Tls10" } else { $negotiatedProtocol })" }
+        ([ConnectTestResult]::FailedTls) { Write-Warning "TCP connected, failed to negotiate secure channel in mode $TlsVersion (Internal error: $handshakeException)" }
+        ([ConnectTestResult]::FailedNetwork) { Write-Warning "Failed to reach the destination. This is connectivity or DNS problem, not TLS issue (Internal error: $handshakeException)" }
     }
 
-    $res = [ordered]@{ 
+    $res = [ordered]@{
         ConnectResult = $connectResult
-        NegotiatedProtocol = $negotiatedProtocol
-        RemoteAddress = $remoteAddress
+        ConnectedRemoteAddress = $remoteAddress
+        SecureChannelProtocol = $negotiatedProtocol
     }
     $resObject = New-Object PSObject -Property $res
     return $resObject

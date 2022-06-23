@@ -3,20 +3,6 @@
 
 $version = "2022-06-20"
 
-function Write-OK { param($str) Write-Host -ForegroundColor green $str } 
-function Write-nonOK { param($str) Write-Host -ForegroundColor red $str } 
-function Write-Warning { param($str) Write-Host -ForegroundColor magenta $str } 
-function Write-Info { param($str) Write-Host -ForegroundColor yellow $str } 
-function Write-Detail { param($str) Write-Host -ForegroundColor gray $str } 
-function Write-Break { Write-Host -ForegroundColor Gray "********************************************************************************" }
-function Write-Title 
-{
-    param($str)
-    Write-Host -ForegroundColor Yellow ("=" * ($str.Length + 4))
-    Write-Host -ForegroundColor Yellow "| $str |" 
-    Write-Host -ForegroundColor Yellow ("=" * ($str.Length + 4))
-} 
-
 
 #
 # Functions shared by Analysis part of the script
@@ -74,59 +60,9 @@ $cipherSuiteToMinimumOsVersion = @{
 }
 
 
-function Test-Tls12ClientReadiness
+function GetEnvironmentInfo
 {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory=$true, HelpMessage="Comma-separated list of TLS 1.2 cipher suites honoured by server. IANA notation of cipher suites required.")] 
-        [string]$ServerHonouredTls12CipherSuites,
-        [Parameter(Mandatory=$false, HelpMessage="Comma-separated list of elliptic curves honoured by server with EC* key-exchange.")] 
-        [string]$ServerHonouredEllipticCurves = "NistP256,NistP384"
-    )
-
-    Write-Detail "TLS 1.2 readiness checker v. $version"
-    
-    # input param check:
-
-
-
-
-
-    # List of TLS 1.2 cipher suites honoured by the server.
-    # In this hash map for each cipher suite we have lowest Windows OS build version which supports it (when properly patched).
-    # TODO: finish!!!
-        
-    $serverHonouredTls12CipherSuitesArray = $ServerHonouredTls12CipherSuites.Split(",")
-    $serverHonouredTls12CipherSuitesMap = @{}
-    $x = $serverHonouredTls12CipherSuitesArray | Select-Object { $serverHonouredTls12CipherSuitesMap[$_] = $cipherSuiteToMinimumOsVersion[$_] }    
-    $localOsSupportedServerHonouredTls12CipherSuites = $serverHonouredTls12CipherSuitesMap.Keys | Where-Object { $osVersion -ge $serverHonouredTls12CipherSuitesMap[$_] }
-    
-    # List of ECC curves relevant for ECDHE cipher suites
-    $requiredEccs = $ServerHonouredEllipticCurves.Split(",") 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    # 
-    #
-    #
-    Write-Title "Analysis of TLS 1.2 compatibility: OS"
-    #
-    #
-    #
-
-    Write-Detail "Getting environment info..."
+    Write-Verbose "Getting environment info..."
 
     $envOsVersion = [System.Environment]::OSVersion.Version # if OS went through update (W8 -> W8.1 -> W10 ...), this may return pre-update version (https://stackoverflow.com/questions/33328739/system-environment-osversion-returns-wrong-version) 
     $winVersionRex = "([0-9]+\.)+[0-9]+"
@@ -134,35 +70,62 @@ function Test-Tls12ClientReadiness
     if ((systeminfo /fo csv | ConvertFrom-Csv | Select-Object -Property "OS Version")."OS Version" -match $winVersionRex) { $systemInfoVersion = [version]$Matches[0] } # systeminfo command is considered obsolete but gives up to date version
     $osVersion = if ($envOsVersion -gt $systemInfoVersion) { $envOsVersion } else { $systemInfoVersion } # Take the highest OS version seen
 
-    Write-Host "PS Version:" $PSversionTable.PSVersion
-    Write-Host "PS Edition: " $PSversionTable.PSEdition
-    Write-Host "CLR Version: " $PSversionTable.CLRVersion
-    Write-Host "OS Version: system.environment: $envOsVersion, systeminfo: $systemInfoVersion --> $osVersion"
+    Write-Verbose "PS Version:" $PSversionTable.PSVersion
+    Write-Verbose "PS Edition: " $PSversionTable.PSEdition
+    Write-Verbose "CLR Version: " $PSversionTable.CLRVersion
+    Write-Verbose "OS Version: system.environment: $envOsVersion, systeminfo: $systemInfoVersion --> $osVersion"
 
-    Write-Break
+    $resultTable = [ordered]@{        
+        "OsVersion" = $osVersion
+        "PowerShellVersion" = $PSversionTable.PSVersion
+        "PowerShellEdition" = $PSversionTable.PSEdition
+        "ClrVersion" = $PSversionTable.CLRVersion
+    }
+    $resObject = New-Object PSObject -Property $resultTable
+    return $resObject
+}
 
-    Write-Detail "Running Hot Fix check..."
+function GetMitigationTable
+{
+    param ($name, $message, $scriptFile, $url)
+    return [ordered]@{
+            "MitigationId" = $name
+            "MitigationMessage" = $message
+            "MitigationScriptFile" = $scriptFile        
+            "DocsURL" = $url
+        }
+}
+
+function DoHotFixCheck
+{
+    param ($osVersion)
+
+    Write-Verbose "HotFix checking..."
 
     function CheckHotfix {
         param ($hotfixId)
     
-        Write-Detail "Checking $hotfixId..."
+        Write-Verbose "Checking $hotfixId..."
         $hotfix = Get-HotFix | Where-Object { $_.HotFixID -eq $hotfixId } 
         if ($hotfix)
         {
-            Write-Detail "Hotfix $hotfixId found: $hotfix"
+            Write-Verbose "Found hotfix: $hotfix"
             return $true
         }
         else
         {
-            Write-Detail "Hotfix $hotfixId not installed."
             return $false
         }
     }
 
+    $success = $false
+    $missingHotfixes = @()
+    $docsURL = $null
+    
     if ($osVersion.Major -ge 10)
     {
-        Write-OK "No hot fixes are necessary for TLS 1.2 support on this OS version."
+        Write-Host "Hotfix check passed. No hot fixes are necessary for TLS 1.2 support on this OS version."
+        $success = $true
     }
     elseif ($osVersion -ge [version]"6.3")
     {
@@ -170,11 +133,15 @@ function Test-Tls12ClientReadiness
         $found = CheckHotfix $hotfixId    
         if ($found)
         {
-            Write-OK "Hotfix check passed."
+            Write-Host "Hotfix check passed."
+            $success = $true
         }
         else
         {
-            Write-nonOK "ISSUE FOUND: $hotfixId missing, see https://docs.microsoft.com/en-us/windows/win32/secauthn/tls-cipher-suites-in-windows-8-1"
+            Write-Warning "$hotfixId missing"
+            $success = $false
+            $missingHotfixes += $hotfixId
+            $docsUrl = "https://docs.microsoft.com/en-us/windows/win32/secauthn/tls-cipher-suites-in-windows-8-1"
         }
     }
     elseif ($osVersion -ge [version]"6.1")
@@ -183,23 +150,39 @@ function Test-Tls12ClientReadiness
         $found = CheckHotfix $hotfixId    
         if ($found)
         {
-            Write-OK "Hotfix check passed."
+            Write-Host "Hotfix check passed."
+            $success = $true
         }
         else
         {
-            Write-nonOK "ISSUE FOUND: $hotfixId missing, see https://support.microsoft.com/en-us/topic/update-to-enable-tls-1-1-and-tls-1-2-as-default-secure-protocols-in-winhttp-in-windows-c4bd73d2-31d7-761e-0178-11268bb10392"
+            Write-Warning "$hotfixId missing."
+            $success = $false
+            $missingHotfixes += $hotfixId
+            $mitigationTable = GetMitigationTable "Hotfix", "$hotfixId missing.", $null, "https://support.microsoft.com/en-us/topic/update-to-enable-tls-1-1-and-tls-1-2-as-default-secure-protocols-in-winhttp-in-windows-c4bd73d2-31d7-761e-0178-11268bb10392"
         }
     }
     else
     {
         Write-Error "This version of OS is not supported by the troubleshooting script (supported: Windows Server 2008 R2+, Windows 7+)"
+        $success = $false
     }
 
-    Write-Break
+    $resultTable = [ordered]@{
+        "Success" = $success;
+        "MissingHotfixes" = $missingHotfixes;
+        "Mitigation" = $mitigationTable;
+    }
+    $resObject = New-Object PSObject -Property $resultTable
+    return $resObject
+}
+
+function DoClientTlsEnabledCheck 
+{
+    param($osVersion)
 
     $tls12ClientPath = "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.2\Client"
     $clientCheckOK = $true 
-    $mitigations = @()
+    $mitigations = @()    
 
     if (-not (CheckRegValueIsExpected $tls12ClientPath "Enabled" 1 $true $boolCheck))
     {
@@ -212,7 +195,7 @@ function Test-Tls12ClientReadiness
     { 
         # source: https://support.microsoft.com/en-us/topic/update-to-enable-tls-1-1-and-tls-1-2-as-default-secure-protocols-in-winhttp-in-windows-c4bd73d2-31d7-761e-0178-11268bb10392
         # source: https://support.microsoft.com/en-us/topic/update-to-add-support-for-tls-1-1-and-tls-1-2-in-windows-server-2008-sp2-windows-embedded-posready-2009-and-windows-embedded-standard-2009-b6ab553a-fa8f-3f5e-287c-e752eb3ce5f4
-        Write-Detail "For old Windows versions (WS 2012, Windows 7 and older) TLS 1.2 must be explicitly enabled..."
+        Write-Verbose "For old Windows versions (WS 2012, Windows 7 and older) TLS 1.2 must be explicitly enabled..."
         $undefinedMeansEnabled = $false
     }
     if (-not (CheckRegValueIsExpected $tls12ClientPath "DisabledByDefault" 0 $undefinedMeansEnabled $boolCheck))
@@ -220,20 +203,37 @@ function Test-Tls12ClientReadiness
         $mitigations += GetRegSetValueString $tls12ClientPath "DisabledByDefault" 0
         $clientCheckOK = $false
     }
+
+    $success = $false
+    $scriptFile = $null
+    $mitigationTable = $null
+    
     if ($clientCheckOK)
     {
-        Write-OK "TLS 1.2 client usage enabled."
+        Write-Verbose "TLS 1.2 client usage enabled."
+        $success = $true
     }
     else
     {
+        Write-Warning "ISSUE FOUND: TLS 1.2 client usage disabled."
+
+        $success = $false
         $mitigationName = "RegTlsClientEnable"
-        $scriptFile = OutputMitigationToPs1 $mitigationName $mitigations
-        Write-nonOK "ISSUE FOUND: TLS 1.2 client usage disabled."
-        Write-nonOK "MITIGATION '$mitigationName': per https://docs.microsoft.com/en-us/windows-server/identity/ad-fs/operations/manage-ssl-protocols-in-ad-fs"
-        Write-nonOK "    Mitigation script generated at $scriptFile"
-        Write-nonOK "    Run the mitigation script as Administrator and restart the computer."
+        $scriptFile = OutputMitigationToPs1 $mitigationName $mitigations        
+        $mitigationTable = GetMitigationTable $mitigationName, "TLS 1.2 client usage disabled. Mitigation script generated, run it as Administrator and restart the computer.", $scriptFile, "https://docs.microsoft.com/en-us/windows-server/identity/ad-fs/operations/manage-ssl-protocols-in-ad-fs"
     }
-    Write-Break
+    
+    $resultTable = [ordered]@{
+        "Success" = $success
+        "Mitigation" = $mitigationTable
+    }
+    $resObject = New-Object PSObject -Property $resultTable
+    return $resObject
+}  
+
+function DoEnabledCipherSuitesCheck
+{
+    param($osVersion, $serverHonouredTls12CipherSuites, $localOsSupportedServerHonouredTls12CipherSuites)
     
     function GetAllCipherSuitesByBCryptAPI
     {
@@ -296,19 +296,21 @@ function Test-Tls12ClientReadiness
             }
             else
             {
-                Write-nonOK "Error when retrieving list of cipher suites by BCript API - return code $ret"
+                Write-Error "Error when retrieving list of cipher suites by BCript API - return code $ret"
             }
         
         }
-        catch { Write-nonOK "Error when retrieving list of cipher suites by BCript API: $_" }
+        catch { Write-Error "Error when retrieving list of cipher suites by BCript API: $_" }
     }
 
+    $success = $false
+    
     $gettlsciphersuiteAnalysisDone = $false
     $requiredEnabledCipherSuites = @()
     $allEnabledCipherSuites = @()
     if ($osVersion.Major -ge 10) 
     {
-        Write-Detail "Running Cipher Suite check (Get-TlsCipherCuite)..."
+        Write-Verbose "Running Cipher Suite check (Get-TlsCipherCuite)..."
 
         $allEnabledCipherSuiteObjs = Get-TlsCipherSuite
         $allEnabledCipherSuites = $allEnabledCipherSuiteObjs.Name
@@ -318,35 +320,37 @@ function Test-Tls12ClientReadiness
                     if (($_.Protocols | Where-Object { $_ -eq $tls12protocolCode }).Count -gt 0) { $_.Name }
                 }
             }
-        Write-Detail "All enabled TLS 1.2 cipher suites: $tls12EnabledCipherSuites"
+        Write-Verbose "All enabled TLS 1.2 cipher suites: $tls12EnabledCipherSuites"
 
         $requiredEnabledCipherSuites = $localOsSupportedServerHonouredTls12CipherSuites | Where-Object { $allEnabledCipherSuites -contains $_ }
-        Write-Detail "Matching cipher suites: $requiredEnabledCipherSuites"
+        Write-Verbose "Matching cipher suites: $requiredEnabledCipherSuites"
 
         if ($requiredEnabledCipherSuites)
         { 
-            Write-OK "Cipher Suite check passed: at least one of the TLS 1.2 cipher suites supported by the server is enabled."
+            Write-Host "Cipher Suite check passed: at least one of the TLS 1.2 cipher suites supported by the server is enabled."
             $gettlsciphersuiteAnalysisDone = $true
+            $success = $true
         }
         elseif ($tls12EnabledCipherSuites) 
         {
-            Write-nonOK "ISSUE FOUND: None of the TLS 1.2 cipher suites supported by the server are enabled."
+            Write-Warning "ISSUE FOUND: None of the TLS 1.2 cipher suites supported by the server are enabled."
             $gettlsciphersuiteAnalysisDone = $true
+            $success = $false
         }
         else
         { 
-            Write-nonOK "UNEXPECTED ISSUE FOUND: TLS 1.2 does not seem to be supported (no TLS 1.2 cipher suites enabled)" 
-            Write-Detail "All enabled cipher suites: $allEnabledCipherSuites"
+            Write-Warning "UNEXPECTED ISSUE FOUND: TLS 1.2 does not seem to be supported (no TLS 1.2 cipher suites enabled)" 
+            Write-Verbose "All enabled cipher suites: $allEnabledCipherSuites"
             # No mitigation here: in this branch of the code we're running on Windows Server 2016+, Windows 10+ ==> TLS 1.2 should be supported out of the box
+            $success = $false
         }
-        Write-Break
     }
 
     if (-not $gettlsciphersuiteAnalysisDone)
     {
-        Write-Detail "Running Cipher Suite check (BCrypt)..."
+        Write-Verbose "Running Cipher Suite check (BCrypt)..."
         $allEnabledCipherSuites = GetAllCipherSuitesByBCryptAPI
-        Write-Detail "All enabled cipher suites: $allEnabledCipherSuites"
+        Write-Verbose "All enabled cipher suites: $allEnabledCipherSuites"
         $requiredEnabledCipherSuites = $serverHonouredTls12CipherSuites.Keys | Where-Object { $allEnabledCipherSuites -contains $_ }
         $unsupportedEnabledCipherSuites = $requiredEnabledCipherSuites | Where-Object { $localOsSupportedServerHonouredTls12CipherSuites -notcontains $_ }
         if ($unsupportedEnabledCipherSuites)
@@ -357,17 +361,26 @@ function Test-Tls12ClientReadiness
 
         if ($requiredEnabledCipherSuites)
         {
-            Write-OK "At least one of the TLS 1.2 cipher suites supported by the server is enabled and working."
-            Write-Detail "Matching cipher suites: $requiredEnabledCipherSuites"
+            Write-Host "At least one of the TLS 1.2 cipher suites supported by the server is enabled and working."
+            Write-Verbose "Matching cipher suites: $requiredEnabledCipherSuites"
         }
         else
         {
-            Write-nonOK "ISSUE FOUND: None of the TLS 1.2 cipher suites supported by the server are enabled."
+            Write-Warning "ISSUE FOUND: None of the TLS 1.2 cipher suites supported by the server are enabled."
         }
-        Write-Break
     }
+        
+    $resultTable = [ordered]@{
+        "Success" = $success;
+        "AllEnabledCipherSuites" = $allEnabledCipherSuites;
+        "MatchingEnabledCipherSuites" = $requiredEnabledCipherSuites
+    }
+    $resObject = New-Object PSObject -Property $resultTable
+    return $resObject
+}
 
-
+function DoGroupPolicyCheck
+{
     Write-Detail "Running Group Policy check..."
 
     function GetFunctionsList
@@ -481,6 +494,12 @@ function Test-Tls12ClientReadiness
 
     Write-Break
 
+}
+
+
+function DoKeyExchangeCheck
+{
+
     Write-Detail "Running Key Exchange check..."
 
     function CheckKeyExchangeEnabled
@@ -542,6 +561,10 @@ function Test-Tls12ClientReadiness
 
     Write-Break
 
+}
+
+function DoEllipticCurveCheck
+{
 
     Write-Detail "Running Elliptic Curve check..."
 
@@ -605,6 +628,10 @@ function Test-Tls12ClientReadiness
         }
     }
 
+}
+
+function DoNetFrameworkCheck
+{
 
     #
     #
@@ -683,4 +710,72 @@ function Test-Tls12ClientReadiness
     {
         Write-OK "All mitigations required to ensure TLS 1.2-compatibility of legacy .NET applications are in place."
     }
+}
+
+
+
+function Test-Tls12ClientReadiness
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory=$true, HelpMessage="Comma-separated list of TLS 1.2 cipher suites honoured by server. IANA notation of cipher suites required.")] 
+        [string]$ServerHonouredTls12CipherSuites,
+        [Parameter(Mandatory=$false, HelpMessage="Comma-separated list of elliptic curves honoured by server with EC* key-exchange.")] 
+        [string]$ServerHonouredEllipticCurves = "NistP256,NistP384"
+    )
+
+    Write-Detail "TLS 1.2 readiness checker v. $version"
+    
+    # input param check:
+
+
+
+
+
+    # List of TLS 1.2 cipher suites honoured by the server.
+    # In this hash map for each cipher suite we have lowest Windows OS build version which supports it (when properly patched).
+    # TODO: finish!!!
+        
+    $serverHonouredTls12CipherSuitesArray = $ServerHonouredTls12CipherSuites.Split(",")
+    $serverHonouredTls12CipherSuitesMap = @{}
+    $x = $serverHonouredTls12CipherSuitesArray | Select-Object { $serverHonouredTls12CipherSuitesMap[$_] = $cipherSuiteToMinimumOsVersion[$_] }    
+    $localOsSupportedServerHonouredTls12CipherSuites = $serverHonouredTls12CipherSuitesMap.Keys | Where-Object { $osVersion -ge $serverHonouredTls12CipherSuitesMap[$_] }
+    
+    # List of ECC curves relevant for ECDHE cipher suites
+    $requiredEccs = $ServerHonouredEllipticCurves.Split(",") 
+
+
+    # 
+    #
+    #
+    Write-Verbose "Analysis of TLS 1.2 compatibility: OS"
+    #
+    #
+    #
+    
+    $enviroInfo = GetEnvironmentInfo 
+
+    $hotfixCheckResult = DoHotFixCheck $enviroInfo.OsVersion
+    $clientTlsEnabledCheckResult = DoClientTlsEnabledCheck $enviroInfo.OsVersion
+    $enabledCipherSuitesCheckResult = DoEnabledCipherSuitesCheck $enviroInfo.OsVersion, $serverHonouredTls12CipherSuites, $localOsSupportedServerHonouredTls12CipherSuites
+
+    $groupPolicyCheckResult = DoGroupPolicyCheck 
+    $keyExchangeCheckResult = DoKeyExchangeCheck
+    $ellipticCurveCheckResult = DoEllipticCurveCheck
+    $netFrameworkCheckResult = DoNetFrameworkCheck
+
+    $checksTable = [ordered]@{
+        "HotFix" = $hotfixCheckResult
+        "ClientTlsEnabled" = $clientTlsEnabledCheckResult
+        "GroupPolicy" =  $groupPolicyCheckResult
+        "KeyExchange" = $keyExchangeCheckResult
+        "EllipticCurve" = $ellipticCurveCheckResult
+        "NetFramework" = $netFrameworkCheckResult
+    }
+
+    # TODO: recap of success and mitigations
+
+
+    $resObject = New-Object PSObject -Property $checksTable
+    return $resObject
 }

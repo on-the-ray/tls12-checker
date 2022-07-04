@@ -37,7 +37,7 @@ function CheckRegValueIsExpected
     if (Test-Path -Path $path)
     {
         $value =  Get-ItemProperty -Path $path | Select-Object -ExpandProperty $propertyName -ErrorAction SilentlyContinue
-        if ($value -eq $null) 
+        if ($null -eq $value) 
         { 
             return $undefinedMeansExpectedValue
         }
@@ -70,29 +70,28 @@ function GetEnvironmentInfo
     if ((systeminfo /fo csv | ConvertFrom-Csv | Select-Object -Property "OS Version")."OS Version" -match $winVersionRex) { $systemInfoVersion = [version]$Matches[0] } # systeminfo command is considered obsolete but gives up to date version
     $osVersion = if ($envOsVersion -gt $systemInfoVersion) { $envOsVersion } else { $systemInfoVersion } # Take the highest OS version seen
 
-    Write-Verbose "PS Version:" $PSversionTable.PSVersion
-    Write-Verbose "PS Edition: " $PSversionTable.PSEdition
-    Write-Verbose "CLR Version: " $PSversionTable.CLRVersion
+    Write-Verbose "PS Version: $($PSversionTable.PSVersion)"
+    Write-Verbose "PS Edition: $($PSversionTable.PSEdition)"
+    Write-Verbose "CLR Version: $($PSversionTable.CLRVersion)"
     Write-Verbose "OS Version: system.environment: $envOsVersion, systeminfo: $systemInfoVersion --> $osVersion"
 
-    $resultTable = [ordered]@{        
-        "OsVersion" = $osVersion
-        "PowerShellVersion" = $PSversionTable.PSVersion
-        "PowerShellEdition" = $PSversionTable.PSEdition
-        "ClrVersion" = $PSversionTable.CLRVersion
+    $resultTable = [ordered]@{
+        "OS Version" = $osVersion
+        "PowerShell Version" = $PSversionTable.PSVersion
+        "PowerShell Edition" = $PSversionTable.PSEdition
+        "CLR Version" = $PSversionTable.CLRVersion
     }
-    $resObject = New-Object PSObject -Property $resultTable
-    return $resObject
+    return $resultTable
 }
 
 function GetMitigationTable
 {
     param ($name, $message, $scriptFile, $url)
     return [ordered]@{
-            "MitigationId" = $name
-            "MitigationMessage" = $message
-            "MitigationScriptFile" = $scriptFile        
-            "DocsURL" = $url
+            "Mitigation ID" = $name
+            "Mitigation Message" = $message
+            "Mitigation Script File" = $scriptFile        
+            "Docs URL" = $url
         }
 }
 
@@ -119,7 +118,7 @@ function DoHotFixCheck
     }
 
     $success = $false
-    $missingHotfixes = @()
+    $missingHotfixes = $null
     $docsURL = $null
     
     if ($osVersion.Major -ge 10)
@@ -169,11 +168,10 @@ function DoHotFixCheck
 
     $resultTable = [ordered]@{
         "Success" = $success;
-        "MissingHotfixes" = $missingHotfixes;
+        "Missing Hotfixes" = $missingHotfixes;
         "Mitigation" = $mitigationTable;
     }
-    $resObject = New-Object PSObject -Property $resultTable
-    return $resObject
+    return $resultTable
 }
 
 function DoClientTlsEnabledCheck 
@@ -227,13 +225,16 @@ function DoClientTlsEnabledCheck
         "Success" = $success
         "Mitigation" = $mitigationTable
     }
-    $resObject = New-Object PSObject -Property $resultTable
-    return $resObject
+    return $resultTable
 }  
 
 function DoEnabledCipherSuitesCheck
 {
-    param($osVersion, $serverHonouredTls12CipherSuites, $localOsSupportedServerHonouredTls12CipherSuites)
+    param($osVersion, $checkedCipherSuites)
+    
+    $checkedCipherSuitesMap = @{}
+    $checkedCipherSuites | ForEach-Object { $checkedCipherSuitesMap[$_] = $cipherSuiteToMinimumOsVersion[$_] }
+    $localOsSupportedCheckedCipherSuites = $checkedCipherSuitesMap.Keys | Where-Object { $osVersion -ge $checkedCipherSuitesMap[$_] }
     
     function GetAllCipherSuitesByBCryptAPI
     {
@@ -322,12 +323,12 @@ function DoEnabledCipherSuitesCheck
             }
         Write-Verbose "All enabled TLS 1.2 cipher suites: $tls12EnabledCipherSuites"
 
-        $requiredEnabledCipherSuites = $localOsSupportedServerHonouredTls12CipherSuites | Where-Object { $allEnabledCipherSuites -contains $_ }
-        Write-Verbose "Matching cipher suites: $requiredEnabledCipherSuites"
+        $matchingCipherSuites = $localOsSupportedCheckedCipherSuites | Where-Object { $allEnabledCipherSuites -contains $_ }
+        Write-Verbose "Matching cipher suites: $matchingCipherSuites"
 
-        if ($requiredEnabledCipherSuites)
+        if ($matchingCipherSuites)
         { 
-            Write-Host "Cipher Suite check passed: at least one of the TLS 1.2 cipher suites supported by the server is enabled."
+            Write-Host "Cipher Suite check passed: at least one of the checked cipher suites is enabled."
             $gettlsciphersuiteAnalysisDone = $true
             $success = $true
         }
@@ -351,12 +352,12 @@ function DoEnabledCipherSuitesCheck
         Write-Verbose "Running Cipher Suite check (BCrypt)..."
         $allEnabledCipherSuites = GetAllCipherSuitesByBCryptAPI
         Write-Verbose "All enabled cipher suites: $allEnabledCipherSuites"
-        $requiredEnabledCipherSuites = $serverHonouredTls12CipherSuites.Keys | Where-Object { $allEnabledCipherSuites -contains $_ }
-        $unsupportedEnabledCipherSuites = $requiredEnabledCipherSuites | Where-Object { $localOsSupportedServerHonouredTls12CipherSuites -notcontains $_ }
+        $requiredEnabledCipherSuites = $checkedCipherSuites | Where-Object { $allEnabledCipherSuites -contains $_ }
+        $unsupportedEnabledCipherSuites = $requiredEnabledCipherSuites | Where-Object { $localOsSupportedCheckedCipherSuites -notcontains $_ }
         if ($unsupportedEnabledCipherSuites)
         {
             Write-Warning "Warning: Excluding TLS 1.2 cipher suites which are supported by the server but not working on this OS version: $unsupportedEnabledCipherSuites"
-            $requiredEnabledCipherSuites = $requiredEnabledCipherSuites | Where-Object { $localOsSupportedServerHonouredTls12CipherSuites -contains $_ }
+            $requiredEnabledCipherSuites = $requiredEnabledCipherSuites | Where-Object { $localOsSupportedCheckedCipherSuites -contains $_ }
         }
 
         if ($requiredEnabledCipherSuites)
@@ -372,11 +373,11 @@ function DoEnabledCipherSuitesCheck
         
     $resultTable = [ordered]@{
         "Success" = $success;
-        "AllEnabledCipherSuites" = $allEnabledCipherSuites;
-        "MatchingEnabledCipherSuites" = $requiredEnabledCipherSuites
+        "All Enabled Cipher Suites" = $allEnabledCipherSuites;
+        "Checked Cipher Suites Supported By OS Version" = $localOsSupportedCheckedCipherSuites
+        "Checked Cipher Suites Enabled Locally" = $requiredEnabledCipherSuites
     }
-    $resObject = New-Object PSObject -Property $resultTable
-    return $resObject
+    return $resultTable
 }
 
 function DoGroupPolicyCheck
@@ -713,36 +714,68 @@ function DoNetFrameworkCheck
 }
 
 
+function ToHtml
+{
+    param($table, $title)
+
+    $newTable = [ordered]@{}
+
+    $table.GetEnumerator() | ForEach-Object {
+        $value = $_.Value
+        $key = $_.Key
+        $stringValue = ""
+        if ($null -eq $value) {$stringValue = "none"}
+        else {
+            $valueType = $value.GetType()
+            
+            if ($key -eq "Mitigation")
+            {
+                $stringValue = MitigationToHtml $value
+            }
+            elseif ($valueType.Name -eq "Boolean") { $stringValue = $value.ToString().ToUpper() }
+            elseif ($valueType.Name.EndsWith("[]")) { $stringValue = [string]::Join(", ", $value)}
+            else { $stringValue = $value.ToString() }
+        }
+
+        $newTable[$key] = $stringValue
+    }
+
+    $html = $newTable.GetEnumerator() | Select-Object -Property Key,Value | ConvertTo-Html -Fragment -PreContent @("<h2>$title</h2>") | ForEach-Object { $_ -replace '<tr><th>.*</tr>', "" }
+    return $html
+}
+
+function ToObject
+{
+    param($table, $title)
+
+    $newTable = [ordered]@{}
+    $table.GetEnumerator() | ForEach-Object {
+        $newKey = $_.Key -replace " ",""
+        $newTable[$newKey] = $_.Value
+    }
+
+    $obj = New-Object PSObject -Property $newTable
+    return $obj
+}
+
 
 function Test-Tls12ClientReadiness
 {
     [CmdletBinding()]
     param (
-        [Parameter(Mandatory=$true, HelpMessage="Comma-separated list of TLS 1.2 cipher suites honoured by server. IANA notation of cipher suites required.")] 
-        [string]$ServerHonouredTls12CipherSuites,
-        [Parameter(Mandatory=$false, HelpMessage="Comma-separated list of elliptic curves honoured by server with EC* key-exchange.")] 
-        [string]$ServerHonouredEllipticCurves = "NistP256,NistP384"
+        [Parameter(Mandatory=$true, HelpMessage="Comma-separated list of TLS 1.2 cipher suites to check. IANA notation of cipher suites required.")] 
+        [string]$CipherSuites,
+        [Parameter(Mandatory=$false, HelpMessage="Comma-separated list of elliptic curves to check.")] 
+        [string]$EllipticCurves = "NistP256,NistP384"
     )
 
-    Write-Detail "TLS 1.2 readiness checker v. $version"
-    
+    Write-Host "TLS 1.2 readiness checker v. $version"
+
+    $checkedCipherSuites = $CipherSuites.Split(",")    
+    $checkedEllipticCurves = $EllipticCurves.Split(",") 
+
     # input param check:
-
-
-
-
-
-    # List of TLS 1.2 cipher suites honoured by the server.
-    # In this hash map for each cipher suite we have lowest Windows OS build version which supports it (when properly patched).
-    # TODO: finish!!!
-        
-    $serverHonouredTls12CipherSuitesArray = $ServerHonouredTls12CipherSuites.Split(",")
-    $serverHonouredTls12CipherSuitesMap = @{}
-    $x = $serverHonouredTls12CipherSuitesArray | Select-Object { $serverHonouredTls12CipherSuitesMap[$_] = $cipherSuiteToMinimumOsVersion[$_] }    
-    $localOsSupportedServerHonouredTls12CipherSuites = $serverHonouredTls12CipherSuitesMap.Keys | Where-Object { $osVersion -ge $serverHonouredTls12CipherSuitesMap[$_] }
-    
-    # List of ECC curves relevant for ECDHE cipher suites
-    $requiredEccs = $ServerHonouredEllipticCurves.Split(",") 
+    # TODO
 
 
     # 
@@ -753,29 +786,41 @@ function Test-Tls12ClientReadiness
     #
     #
     
-    $enviroInfo = GetEnvironmentInfo 
+    $enviroTable = GetEnvironmentInfo    
+    $enviroHtml = ToHtml $enviroTable -Title "Environment Info"
+    $enviroObj = ToObject $enviroTable
 
-    $hotfixCheckResult = DoHotFixCheck $enviroInfo.OsVersion
-    $clientTlsEnabledCheckResult = DoClientTlsEnabledCheck $enviroInfo.OsVersion
-    $enabledCipherSuitesCheckResult = DoEnabledCipherSuitesCheck $enviroInfo.OsVersion, $serverHonouredTls12CipherSuites, $localOsSupportedServerHonouredTls12CipherSuites
+    $hotfixCheckTable = DoHotFixCheck $enviroObj.OSVersion
+    $hotfixCheckHtml = ToHtml $hotfixCheckTable -title "Hotfix check"
+    $hotfixCheckObj = ToObject $hotfixCheckTable
 
-    $groupPolicyCheckResult = DoGroupPolicyCheck 
-    $keyExchangeCheckResult = DoKeyExchangeCheck
-    $ellipticCurveCheckResult = DoEllipticCurveCheck
-    $netFrameworkCheckResult = DoNetFrameworkCheck
+    $clientTlsEnabledCheckTable = DoClientTlsEnabledCheck $enviroObj.OSVersion
+    $clientTlsEnabledCheckHtml = ToHtml $clientTlsEnabledCheckTable -title  "Client TLS Enablement Check"
+    $clientTlsEnabledCheckObj = ToObject $clientTlsEnabledCheckTable
 
-    $checksTable = [ordered]@{
-        "HotFix" = $hotfixCheckResult
-        "ClientTlsEnabled" = $clientTlsEnabledCheckResult
-        "GroupPolicy" =  $groupPolicyCheckResult
-        "KeyExchange" = $keyExchangeCheckResult
-        "EllipticCurve" = $ellipticCurveCheckResult
-        "NetFramework" = $netFrameworkCheckResult
+    $enabledCipherSuitesCheckTable = DoEnabledCipherSuitesCheck $enviroObj.OSVersion $checkedCipherSuites
+    $enabledCipherSuitesCheckHtml = ToHtml $enabledCipherSuitesCheckTable -title "Enabled Cipher Suites Check"
+    $enabledCipherSuitesCheckObj = ToObject $enabledCipherSuitesCheckTable
+
+    #$groupPolicyCheck = DoGroupPolicyCheck 
+    #$keyExchangeCheck = DoKeyExchangeCheck
+    #$ellipticCurveCheck = DoEllipticCurveCheck
+    #$netFrameworkCheck = DoNetFrameworkCheck
+
+
+    $resultTable = [ordered]@{
+        "Environment Info" = $enviroObj;
+        "Hotfix Check" = $hotfixCheckObj;
+        "Client TLS Enabled Check" = $clientTlsEnabledCheckObj;
+        "Enabled Cipher Suites Check" = $enabledCipherSuitesCheckObj;
+        #"GroupPolicy" =  $groupPolicyCheck;
+        #"KeyExchange" = $keyExchangeCheck;
+        #"EllipticCurve" = $ellipticCurveCheck;
+        #"NetFramework" = $netFrameworkCheck;
     }
 
     # TODO: recap of success and mitigations
 
-
-    $resObject = New-Object PSObject -Property $checksTable
+    $resObject = ToObject $resultTable
     return $resObject
 }

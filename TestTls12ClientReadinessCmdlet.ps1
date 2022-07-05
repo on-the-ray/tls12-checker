@@ -84,15 +84,16 @@ function GetEnvironmentInfo
     return $resultTable
 }
 
-function GetMitigationTable
+function GetMitigationObj
 {
-    param ($name, $message, $scriptFile, $url)
-    return [ordered]@{
-            "Mitigation ID" = $name
-            "Mitigation Message" = $message
-            "Mitigation Script File" = $scriptFile        
-            "Docs URL" = $url
-        }
+    param ($name, $message, $script, $scriptFile, $url)
+    return [PSCustomObject]@{
+        MitigationID = $name
+        Message = $message
+        ScriptFile = $scriptFile
+        Script = $script
+        DocsURL = $url
+    }
 }
 
 function DoHotFixCheck
@@ -118,8 +119,9 @@ function DoHotFixCheck
     }
 
     $success = $false
-    $missingHotfixes = $null
-    $docsURL = $null
+    $missingHotfixes = @()
+    $requiredHotfixes = @()
+    $docsUrl = $null
     
     if ($osVersion.Major -ge 10)
     {
@@ -129,6 +131,7 @@ function DoHotFixCheck
     elseif ($osVersion -ge [version]"6.3")
     {
         $hotfixId = "KB2919355"
+        $requiredHotfixes += $hotfixId
         $found = CheckHotfix $hotfixId    
         if ($found)
         {
@@ -146,6 +149,7 @@ function DoHotFixCheck
     elseif ($osVersion -ge [version]"6.1")
     {
         $hotfixId = "KB3140245"
+        $requiredHotfixes += $hotfixId
         $found = CheckHotfix $hotfixId    
         if ($found)
         {
@@ -157,7 +161,7 @@ function DoHotFixCheck
             Write-Warning "$hotfixId missing."
             $success = $false
             $missingHotfixes += $hotfixId
-            $mitigationTable = GetMitigationTable "Hotfix", "$hotfixId missing.", $null, "https://support.microsoft.com/en-us/topic/update-to-enable-tls-1-1-and-tls-1-2-as-default-secure-protocols-in-winhttp-in-windows-c4bd73d2-31d7-761e-0178-11268bb10392"
+            $mitigationTable = GetMitigationObj -name "Hotfix" -message "$hotfixId missing." -url "https://support.microsoft.com/en-us/topic/update-to-enable-tls-1-1-and-tls-1-2-as-default-secure-protocols-in-winhttp-in-windows-c4bd73d2-31d7-761e-0178-11268bb10392"
         }
     }
     else
@@ -168,6 +172,7 @@ function DoHotFixCheck
 
     $resultTable = [ordered]@{
         "Success" = $success;
+        "Required Hotfixes" = $requiredHotfixes;
         "Missing Hotfixes" = $missingHotfixes;
         "Mitigation" = $mitigationTable;
     }
@@ -218,7 +223,7 @@ function DoClientTlsEnabledCheck
         $success = $false
         $mitigationName = "RegTlsClientEnable"
         $scriptFile = OutputMitigationToPs1 $mitigationName $mitigations        
-        $mitigationTable = GetMitigationTable $mitigationName, "TLS 1.2 client usage disabled. Mitigation script generated, run it as Administrator and restart the computer.", $scriptFile, "https://docs.microsoft.com/en-us/windows-server/identity/ad-fs/operations/manage-ssl-protocols-in-ad-fs"
+        $mitigationTable = GetMitigationObj -name $mitigationName -message "TLS 1.2 client usage disabled. Mitigation script generated, run it as Administrator and restart the computer." -script $mitigations -scriptFile $scriptFile -url "https://docs.microsoft.com/en-us/windows-server/identity/ad-fs/operations/manage-ssl-protocols-in-ad-fs"
     }
     
     $resultTable = [ordered]@{
@@ -230,12 +235,11 @@ function DoClientTlsEnabledCheck
 
 function DoEnabledCipherSuitesCheck
 {
-    param($osVersion, $checkedCipherSuites)
+    param($osVersion, $inputCipherSuites)
     
-    $checkedCipherSuitesMap = @{}
-    $checkedCipherSuites | ForEach-Object { $checkedCipherSuitesMap[$_] = $cipherSuiteToMinimumOsVersion[$_] }
-    $localOsSupportedCheckedCipherSuites = $checkedCipherSuitesMap.Keys | Where-Object { $osVersion -ge $checkedCipherSuitesMap[$_] }
-    
+    $localOsSupportedCipherSuites = $inputCipherSuites
+        | Where-Object { $osVersion -ge $cipherSuiteToMinimumOsVersion[$_] }
+
     function GetAllCipherSuitesByBCryptAPI
     {
         # source: https://docs.microsoft.com/en-us/windows/win32/api/bcrypt/nf-bcrypt-bcryptenumcontextfunctions
@@ -307,7 +311,7 @@ function DoEnabledCipherSuitesCheck
     $success = $false
     
     $gettlsciphersuiteAnalysisDone = $false
-    $requiredEnabledCipherSuites = @()
+    $matchingCipherSuites = @()
     $allEnabledCipherSuites = @()
     if ($osVersion.Major -ge 10) 
     {
@@ -323,24 +327,24 @@ function DoEnabledCipherSuitesCheck
             }
         Write-Verbose "All enabled TLS 1.2 cipher suites: $tls12EnabledCipherSuites"
 
-        $matchingCipherSuites = $localOsSupportedCheckedCipherSuites | Where-Object { $allEnabledCipherSuites -contains $_ }
+        $matchingCipherSuites = $localOsSupportedCipherSuites | Where-Object { $allEnabledCipherSuites -contains $_ }
         Write-Verbose "Matching cipher suites: $matchingCipherSuites"
 
         if ($matchingCipherSuites)
         { 
-            Write-Host "Cipher Suite check passed: at least one of the checked cipher suites is enabled."
+            Write-Host "Cipher Suite check passed: at least one of the input cipher suites is enabled."
             $gettlsciphersuiteAnalysisDone = $true
             $success = $true
         }
-        elseif ($tls12EnabledCipherSuites) 
+        elseif ($tls12EnabledCipherSuites)
         {
-            Write-Warning "ISSUE FOUND: None of the TLS 1.2 cipher suites supported by the server are enabled."
+            Write-Warning "ISSUE FOUND: None of the tested cipher suites are enabled."
             $gettlsciphersuiteAnalysisDone = $true
             $success = $false
         }
         else
         { 
-            Write-Warning "UNEXPECTED ISSUE FOUND: TLS 1.2 does not seem to be supported (no TLS 1.2 cipher suites enabled)" 
+            Write-Warning "UNEXPECTED ISSUE FOUND: TLS 1.2 does not seem to be supported (no tested cipher suites enabled)"
             Write-Verbose "All enabled cipher suites: $allEnabledCipherSuites"
             # No mitigation here: in this branch of the code we're running on Windows Server 2016+, Windows 10+ ==> TLS 1.2 should be supported out of the box
             $success = $false
@@ -352,30 +356,30 @@ function DoEnabledCipherSuitesCheck
         Write-Verbose "Running Cipher Suite check (BCrypt)..."
         $allEnabledCipherSuites = GetAllCipherSuitesByBCryptAPI
         Write-Verbose "All enabled cipher suites: $allEnabledCipherSuites"
-        $requiredEnabledCipherSuites = $checkedCipherSuites | Where-Object { $allEnabledCipherSuites -contains $_ }
-        $unsupportedEnabledCipherSuites = $requiredEnabledCipherSuites | Where-Object { $localOsSupportedCheckedCipherSuites -notcontains $_ }
+        $matchingCipherSuites = $inputCipherSuites | Where-Object { $allEnabledCipherSuites -contains $_ }
+        $unsupportedEnabledCipherSuites = $matchingCipherSuites | Where-Object { $localOsSupportedCipherSuites -notcontains $_ }
         if ($unsupportedEnabledCipherSuites)
         {
-            Write-Warning "Warning: Excluding TLS 1.2 cipher suites which are supported by the server but not working on this OS version: $unsupportedEnabledCipherSuites"
-            $requiredEnabledCipherSuites = $requiredEnabledCipherSuites | Where-Object { $localOsSupportedCheckedCipherSuites -contains $_ }
+            Write-Warning "Warning: Excluding input cipher suites returned by BCrypt but not supported by this OS version: $unsupportedEnabledCipherSuites"
+            $matchingCipherSuites = $matchingCipherSuites | Where-Object { $localOsSupportedCipherSuites -contains $_ }
         }
 
-        if ($requiredEnabledCipherSuites)
+        if ($matchingCipherSuites)
         {
-            Write-Host "At least one of the TLS 1.2 cipher suites supported by the server is enabled and working."
-            Write-Verbose "Matching cipher suites: $requiredEnabledCipherSuites"
+            Write-Host "At least one of the tested cipher suites is enabled and working."
+            Write-Verbose "Matching cipher suites: $matchingCipherSuites"
         }
         else
         {
-            Write-Warning "ISSUE FOUND: None of the TLS 1.2 cipher suites supported by the server are enabled."
+            Write-Warning "ISSUE FOUND: None of the tested cipher suites are enabled."
         }
     }
         
     $resultTable = [ordered]@{
         "Success" = $success;
         "All Enabled Cipher Suites" = $allEnabledCipherSuites;
-        "Checked Cipher Suites Supported By OS Version" = $localOsSupportedCheckedCipherSuites
-        "Checked Cipher Suites Enabled Locally" = $requiredEnabledCipherSuites
+        "Tested Cipher Suites Supported By Local OS Version" = $localOsSupportedCipherSuites
+        "Tested Cipher Suites Passing The Check" = $matchingCipherSuites
     }
     return $resultTable
 }
@@ -406,7 +410,7 @@ function DoGroupPolicyCheck
         Write-Detail "Group Policy cipher suites override defined: $allowedCipherSuitesListPerGroupPolicy"
         Write-Detail "Missing cipher suites: $missingCipherSuitesConsideringOS"
 
-        if ((-not $requiredEnabledCipherSuites) -and $missingCipherSuitesConsideringOS)
+        if ((-not $matchingCipherSuites) -and $missingCipherSuitesConsideringOS)
         {
             $mitigation1Name = "GpeditREM"
             Write-nonOK "MITIGATION '$mitigation1Name': via Local Group Policy setting"
@@ -452,7 +456,7 @@ function DoGroupPolicyCheck
     }
     else
     {
-        if (-not $requiredEnabledCipherSuites)
+        if (-not $matchingCipherSuites)
         {
             Write-Detail "No Group Policy cipher suites override defined and cipher suites required by the server are not enabled." 
         
@@ -548,7 +552,7 @@ function DoKeyExchangeCheck
         }
     }
 
-    $keyexchangeFilteredCipherSuites = CheckKeyExchangeEnabled "Diffie-Hellman" "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\KeyExchangeAlgorithms\Diffie-Hellman" "DHE" $requiredEnabledCipherSuites
+    $keyexchangeFilteredCipherSuites = CheckKeyExchangeEnabled "Diffie-Hellman" "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\KeyExchangeAlgorithms\Diffie-Hellman" "DHE" $matchingCipherSuites
 
     if ($osVersion.Major -ge 10) 
     { 
@@ -714,33 +718,50 @@ function DoNetFrameworkCheck
 }
 
 
+
 function ToHtml
 {
     param($table, $title)
 
-    $newTable = [ordered]@{}
-
-    $table.GetEnumerator() | ForEach-Object {
-        $value = $_.Value
-        $key = $_.Key
-        $stringValue = ""
-        if ($null -eq $value) {$stringValue = "none"}
-        else {
-            $valueType = $value.GetType()
-            
-            if ($key -eq "Mitigation")
-            {
-                $stringValue = MitigationToHtml $value
-            }
-            elseif ($valueType.Name -eq "Boolean") { $stringValue = $value.ToString().ToUpper() }
-            elseif ($valueType.Name.EndsWith("[]")) { $stringValue = [string]::Join(", ", $value)}
-            else { $stringValue = $value.ToString() }
+    function ToString {
+        param ($value)
+        if ($null -ne $value) {
+            $valueType = $value.GetType().Name
+            if ($valueType -eq "Boolean") { $stringValue = $value.ToString().ToUpper() }
+            elseif ($valueType.EndsWith("[]")) { $stringValue = [string]::Join(", ", $value)}
+            else { $stringValue = $value.ToString() }                
         }
+        else { $stringValue = $null }
 
-        $newTable[$key] = $stringValue
+        return $stringValue
     }
 
-    $html = $newTable.GetEnumerator() | Select-Object -Property Key,Value | ConvertTo-Html -Fragment -PreContent @("<h2>$title</h2>") | ForEach-Object { $_ -replace '<tr><th>.*</tr>', "" }
+    $newTable = [ordered]@{}
+    $mitigations = @()
+    $table.GetEnumerator() | ForEach-Object {
+        $value = $_.Value
+        $key = [string]$_.Key
+        if ($value) {
+            if ($key.StartsWith("Mitigation")) { $mitigations += $value }
+            else { $newTable[$key] = ToString $value }
+        }
+    }
+
+    $html =  $newTable.GetEnumerator() 
+        | Select-Object -Property Key,Value 
+        | ConvertTo-Html -Fragment -PreContent @("<h2>$title</h2>") | ForEach-Object { $_ -replace '<tr><th>.*</tr>', "" }
+        | Join-String -Separator "`r`n"
+
+    $html += $mitigations | ForEach-Object {
+        $html = "<h3>Mitigation ""$($_.MitigationID)""</h3>"
+        $html += "<p>$($_.Message)</p>"
+        if ($value.ScriptFile) { $html += "<p>Mitigation script was generated to file $($_.ScriptFile)" }
+        if ($value.Script) { $html += "<p>Mitigation script content: <p><code>$(ToString $_.Script)</code></p></p>" }
+        
+        if ($value.DocsUrl) { $html += "<p>Related Microsoft docs page <a href=""$($_.DocsUrl)"">here</a></p>" }
+        $html
+    } | Join-String -Separator "`r`n"
+    
     return $html
 }
 
@@ -764,19 +785,24 @@ function Test-Tls12ClientReadiness
     [CmdletBinding()]
     param (
         [Parameter(Mandatory=$true, HelpMessage="Comma-separated list of TLS 1.2 cipher suites to check. IANA notation of cipher suites required.")] 
-        [string]$CipherSuites,
+        [string[]]$InputCipherSuites,
         [Parameter(Mandatory=$false, HelpMessage="Comma-separated list of elliptic curves to check.")] 
-        [string]$EllipticCurves = "NistP256,NistP384"
+        [string[]]$InputEllipticCurves = "NistP256,NistP384"
     )
 
     Write-Host "TLS 1.2 readiness checker v. $version"
 
-    $checkedCipherSuites = $CipherSuites.Split(",")    
-    $checkedEllipticCurves = $EllipticCurves.Split(",") 
-
     # input param check:
-    # TODO
+    # TODO    
+    $untestableCipherSuites = $InputCipherSuites
+        | Where-Object { -not $cipherSuiteToMinimumOsVersion.ContainsKey($_) }
 
+    if ($untestableCipherSuites)
+    {
+        Write-Error "Unknown cipher suite(s) provided in the input: $($untestableCipherSuites). Cipher suites must be denoted in IANA notation, must be TLS 1.2-enabled and must be supported by this tester."
+        Write-Host "Cipher suites supported by the tester: $($cipherSuiteToMinimumOsVersion.Keys)"
+        return $null
+    }
 
     # 
     #
@@ -798,7 +824,7 @@ function Test-Tls12ClientReadiness
     $clientTlsEnabledCheckHtml = ToHtml $clientTlsEnabledCheckTable -title  "Client TLS Enablement Check"
     $clientTlsEnabledCheckObj = ToObject $clientTlsEnabledCheckTable
 
-    $enabledCipherSuitesCheckTable = DoEnabledCipherSuitesCheck $enviroObj.OSVersion $checkedCipherSuites
+    $enabledCipherSuitesCheckTable = DoEnabledCipherSuitesCheck $enviroObj.OSVersion $InputCipherSuites
     $enabledCipherSuitesCheckHtml = ToHtml $enabledCipherSuitesCheckTable -title "Enabled Cipher Suites Check"
     $enabledCipherSuitesCheckObj = ToObject $enabledCipherSuitesCheckTable
 
